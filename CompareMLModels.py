@@ -15,14 +15,14 @@ For each model:
   - Confusion Matrix (must sum to 150)
   - Accuracy Score
 
-Author: YOUR NAME
-Date: YYYY-MM-DD
+Author: AbhiroopGoel
+Date: 2002-02-12
 """
 
 import numpy as np
 
 from sklearn.datasets import load_iris
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold
 
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.linear_model import LinearRegression
@@ -36,18 +36,12 @@ from sklearn.pipeline import Pipeline
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.discriminant_analysis import QuadraticDiscriminantAnalysis
 
-from sklearn.metrics import confusion_matrix
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import confusion_matrix, accuracy_score
 
 
-# -----------------------------
-# Helper functions
-# -----------------------------
-
-def print_results(model_name: str, actual: np.ndarray, predicted: np.ndarray) -> None:
-    """Print accuracy and confusion matrix, and verify CM sums to 150."""
-    acc = accuracy_score(actual, predicted)
-    cm = confusion_matrix(actual, predicted)
+def print_results(model_name: str, y_true: np.ndarray, y_pred: np.ndarray) -> None:
+    acc = accuracy_score(y_true, y_pred)
+    cm = confusion_matrix(y_true, y_pred)
 
     print(model_name)
     print("Accuracy Score:", round(acc, 3))
@@ -61,155 +55,129 @@ def print_results(model_name: str, actual: np.ndarray, predicted: np.ndarray) ->
 
 
 def clamp_regression_predictions(pred: np.ndarray) -> np.ndarray:
-    """
-    For regression-as-classifier:
-      - round to nearest integer
-      - clamp to valid class labels {0,1,2}
-    """
     pred = pred.round()
     pred = np.where(pred >= 3.0, 2.0, pred)
     pred = np.where(pred <= -1.0, 0.0, pred)
     return pred.astype(int)
 
 
-def run_regression_classifier(model_name: str, poly_degree: int,
-                              X1: np.ndarray, y1: np.ndarray,
-                              X2: np.ndarray, y2: np.ndarray) -> None:
+def run_regression_model(model_name: str, poly_degree: int,
+                         X: np.ndarray, y: np.ndarray,
+                         skf: StratifiedKFold) -> None:
     """
-    Regression-based classifier using 2-fold CV:
-      Train fold1 -> predict fold2
-      Train fold2 -> predict fold1
-    Then concatenate to get 150 total predictions.
+    Regression-as-classifier:
+      For EACH fold:
+        - fit PolynomialFeatures on TRAIN only
+        - fit LinearRegression on TRAIN only
+        - predict on TEST
+      Then combine all test predictions (150 total).
     """
-    poly = PolynomialFeatures(degree=poly_degree)
+    y_pred_all = np.empty_like(y)
 
-    # Fit poly mapping on fold1, then apply to both folds (consistent feature expansion)
-    X1_poly = poly.fit_transform(X1)
-    X2_poly = poly.transform(X2)
+    for train_idx, test_idx in skf.split(X, y):
+        X_train, X_test = X[train_idx], X[test_idx]
+        y_train = y[train_idx]
 
-    reg = LinearRegression()
+        poly = PolynomialFeatures(degree=poly_degree)
+        X_train_poly = poly.fit_transform(X_train)
+        X_test_poly = poly.transform(X_test)
 
-    # Train on fold1, test on fold2
-    reg.fit(X1_poly, y1)
-    pred_fold2 = clamp_regression_predictions(reg.predict(X2_poly))
+        reg = LinearRegression()
+        reg.fit(X_train_poly, y_train)
 
-    # Train on fold2, test on fold1
-    reg.fit(X2_poly, y2)
-    pred_fold1 = clamp_regression_predictions(reg.predict(X1_poly))
+        preds = reg.predict(X_test_poly)
+        y_pred_all[test_idx] = clamp_regression_predictions(preds)
 
-    # Concatenate in the same order as predictions
-    actual = np.concatenate([y2, y1])
-    predicted = np.concatenate([pred_fold2, pred_fold1])
-
-    print_results(model_name, actual, predicted)
+    print_results(model_name, y, y_pred_all)
 
 
-def run_classifier(model_name: str, clf,
-                   X1: np.ndarray, y1: np.ndarray,
-                   X2: np.ndarray, y2: np.ndarray) -> None:
+def run_classifier_model(model_name: str, clf,
+                         X: np.ndarray, y: np.ndarray,
+                         skf: StratifiedKFold) -> None:
     """
-    True classifier using 2-fold CV:
-      Train fold1 -> predict fold2
-      Train fold2 -> predict fold1
-    Then concatenate to get 150 total predictions.
+    True classifier:
+      For EACH fold:
+        - fit model on TRAIN
+        - predict on TEST
+      Then combine all test predictions (150 total).
     """
-    clf.fit(X1, y1)
-    pred_fold2 = clf.predict(X2)
+    y_pred_all = np.empty_like(y)
 
-    clf.fit(X2, y2)
-    pred_fold1 = clf.predict(X1)
+    for train_idx, test_idx in skf.split(X, y):
+        X_train, X_test = X[train_idx], X[test_idx]
+        y_train = y[train_idx]
 
-    actual = np.concatenate([y2, y1])
-    predicted = np.concatenate([pred_fold2, pred_fold1])
+        clf.fit(X_train, y_train)
+        y_pred_all[test_idx] = clf.predict(X_test)
 
-    print_results(model_name, actual, predicted)
+    print_results(model_name, y, y_pred_all)
 
-
-# -----------------------------
-# Main
-# -----------------------------
 
 def main() -> None:
-    # Load Iris dataset (150 samples, 4 features, 3 classes labeled 0/1/2)
     iris = load_iris()
     X = iris.data
     y = iris.target
 
-    # Two-fold split (50/50) with fixed random seed (reproducible)
-    # fold1 ~ 75 samples, fold2 ~ 75 samples
-    X_fold1, X_fold2, y_fold1, y_fold2 = train_test_split(
-        X, y, test_size=0.50, random_state=1
-    )
+    # Fully reproducible folds + balanced classes in each fold
+    skf = StratifiedKFold(n_splits=2, shuffle=True, random_state=1)
 
-    # 1) Linear Regression (degree 1 polynomial features)
-    run_regression_classifier(
+    # 1) Linear Regression (degree 1)
+    run_regression_model(
         "Linear Regression (LinearRegression as classifier)",
         poly_degree=1,
-        X1=X_fold1, y1=y_fold1,
-        X2=X_fold2, y2=y_fold2
+        X=X, y=y, skf=skf
     )
 
     # 2) Polynomial Regression degree 2
-    run_regression_classifier(
+    run_regression_model(
         "Polynomial Regression Degree 2 (LinearRegression as classifier)",
         poly_degree=2,
-        X1=X_fold1, y1=y_fold1,
-        X2=X_fold2, y2=y_fold2
+        X=X, y=y, skf=skf
     )
 
     # 3) Polynomial Regression degree 3
-    run_regression_classifier(
+    run_regression_model(
         "Polynomial Regression Degree 3 (LinearRegression as classifier)",
         poly_degree=3,
-        X1=X_fold1, y1=y_fold1,
-        X2=X_fold2, y2=y_fold2
+        X=X, y=y, skf=skf
     )
 
-    # 4) Naïve Bayes (GaussianNB)
-    # Slides: Naïve Bayes assumes Gaussian distributions and feature independence;
-    # GaussianNB implements the Gaussian probability density approach.
-    run_classifier(
-        "Naïve Bayesian (GaussianNB)",
+    # 4) Naive Bayes
+    run_classifier_model(
+        "Naive Bayesian (GaussianNB)",
         GaussianNB(),
-        X1=X_fold1, y1=y_fold1,
-        X2=X_fold2, y2=y_fold2
+        X=X, y=y, skf=skf
     )
 
-    # 5) kNN
-    # Slides: Euclidean distance is standard; scaling to [0,1] improves distance-based models.
-    # Also: square-root rule for k ≈ sqrt(n_train). Here n_train ~ 75 per fold => sqrt(75) ~ 8.66 => use k=9.
-    k = int(round(np.sqrt(len(y_fold1))))
+    # 5) kNN (k from square-root rule using training size per fold)
+    # Each fold's train size is 75, so k ~= round(sqrt(75)) = 9
+    k = int(round(np.sqrt(75)))
     if k < 1:
         k = 1
 
     knn_pipeline = Pipeline([
-        ("scaler", MinMaxScaler()),            # normalize features to [0,1]
+        ("scaler", MinMaxScaler()),
         ("knn", KNeighborsClassifier(n_neighbors=k))
     ])
 
-    run_classifier(
+    run_classifier_model(
         f"kNN (KNeighborsClassifier, k={k}, Euclidean distance + MinMax scaling)",
         knn_pipeline,
-        X1=X_fold1, y1=y_fold1,
-        X2=X_fold2, y2=y_fold2
+        X=X, y=y, skf=skf
     )
 
     # 6) LDA
-    # Slides: LDA assumes Gaussian class conditionals with shared covariance matrix across classes (linear boundary).
-    run_classifier(
+    run_classifier_model(
         "LDA (LinearDiscriminantAnalysis)",
         LinearDiscriminantAnalysis(),
-        X1=X_fold1, y1=y_fold1,
-        X2=X_fold2, y2=y_fold2
+        X=X, y=y, skf=skf
     )
 
     # 7) QDA
-    # Slides: QDA assumes Gaussian class conditionals with different covariance matrices per class (quadratic boundary).
-    run_classifier(
+    run_classifier_model(
         "QDA (QuadraticDiscriminantAnalysis)",
         QuadraticDiscriminantAnalysis(),
-        X1=X_fold1, y1=y_fold1,
-        X2=X_fold2, y2=y_fold2
+        X=X, y=y, skf=skf
     )
 
 
